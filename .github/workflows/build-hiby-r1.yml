@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf automake bison build-essential flex gawk gettext gzip \
+            autoconf automake bison build-essential flex gawk gettext gtk-doc-tools gzip \
             libgmp-dev libisl-dev libmpc-dev libmpfr-dev libtool-bin make \
             patch perl texinfo unzip xz-utils zip
 
