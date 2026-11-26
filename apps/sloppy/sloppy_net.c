@@ -3726,10 +3726,9 @@ void sl_net_remote_answer(const char *json)
  *   /.rockbox/sloppy/scrobble.tsv        listens waiting for ListenBrainz
  *   /.rockbox/sloppy/listenbrainz.token  the user token, and nothing else
  *   /.scrobbler.log                      the Audioscrobbler log for Last.fm
- * The R1 has no curl or openssl program; its busybox (1.31.1) wget speaks
- * HTTPS with its own TLS, which does not check the server's certificate.
- * api.listenbrainz.org answers its ECDHE-ECDSA-AES128-GCM-SHA256 with
- * X25519. Nothing is sent without a token, and the token is never logged. */
+ * ListenBrainz requests use the R1's system libssl through the socket
+ * helper; certificates are not checked because the system has no CA bundle.
+ * Nothing is sent without a token, and the token is never logged. */
 #define SCR_QUEUE   SL_CAST_DIR "/scrobble.tsv"
 #define SCR_TOKEN   SL_CAST_DIR "/listenbrainz.token"
 #define SCR_LOG     "/.scrobbler.log"
@@ -3955,9 +3954,21 @@ static __attribute__((unused)) int scr_status(const char *out)
     return h ? atoi(h + 9) : 0;
 }
 
-/* One HTTPS request; body NULL for a GET. Returns the HTTP status, or -1
- * with no answer; out gets wget's report and the answer's body. The token
- * is an argument of the shell, so it never passes through a log. */
+/* One scrobble request; ListenBrainz uses the R1's OpenSSL socket helper,
+ * while Last.fm keeps its existing wget form request. */
+struct scr_reply { char *out; size_t cap, used; };
+static bool scr_reply_sink(void *ctx, const char *data, size_t n)
+{
+    struct scr_reply *reply = ctx;
+    if (!reply->cap || reply->used >= reply->cap - 1) return false;
+    size_t room = reply->cap - 1 - reply->used;
+    if (n > room) return false;
+    memcpy(reply->out + reply->used, data, n);
+    reply->used += n;
+    reply->out[reply->used] = '\0';
+    return true;
+}
+
 static int scr_http_as(const char *url, const char *body, char *out, size_t cap, bool listenbrainz)
 {
     char auth[96] = "";
@@ -3974,15 +3985,27 @@ static int scr_http_as(const char *url, const char *body, char *out, size_t cap,
         status = 200;
     }
 #else
-    /* -S prints the server's status line, -q hides the progress bar */
-    const char *argv[] = { "/bin/sh", "-c", body && auth[0] ?
-        "exec /usr/bin/wget -q -S -T 20 -U GabagoolOS -O - --header \"$1\" --post-data \"$2\" \"$3\" 2>&1" : body ?
-        "exec /usr/bin/wget -q -S -T 20 -U GabagoolOS -O - --post-data \"$2\" \"$3\" 2>&1" :
-        "exec /usr/bin/wget -q -S -T 20 -U GabagoolOS -O - --header \"$1\" \"$3\" 2>&1",
-        "wget", auth, body ? body : "", url, NULL };
-    net_run(out, cap, 30000, argv);
-    status = scr_status(out);
-    if (!status) status = -1;
+    if (listenbrainz)
+    {
+        struct scr_reply reply = { out, cap, 0 };
+        struct sl_net_req req = {
+            .method = body ? "POST" : "GET", .url = url, .ua = "GabagoolOS",
+            .headers = auth, .body = body, .timeout_ms = 20000,
+            .sink = scr_reply_sink, .ctx = &reply
+        };
+        if (cap) out[0] = '\0';
+        status = cap ? sl_net_http_req(&req) : -1;
+    }
+    else
+    {
+        /* Last.fm retains its form-encoded request through wget. */
+        const char *argv[] = { "/bin/sh", "-c",
+            "exec /usr/bin/wget -q -S -T 20 -U GabagoolOS -O - --post-data \"$2\" \"$3\" 2>&1",
+            "wget", auth, body ? body : "", url, NULL };
+        net_run(out, cap, 30000, argv);
+        status = scr_status(out);
+        if (!status) status = -1;
+    }
 #endif
     /* whatever came back, the token is not in it (a Last.fm answer is
      * only read for its numbers and a new session, never logged) */

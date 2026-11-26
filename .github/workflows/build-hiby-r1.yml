@@ -2,6 +2,8 @@ name: Build HiBy R1 firmware
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -13,7 +15,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -41,10 +45,80 @@ jobs:
           make -j2
           make zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hiby-r1-firmware
           path: |
             build-r1/rockbox.r1
             build-r1/rockbox.zip
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: hiby-r1-firmware
+          path: dist
+
+      - name: Package release assets
+        id: release_meta
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.GABAGOOL_OTA_SIGNING_KEY }}
+          BOOT_MENU_UPT_URL: ${{ vars.BOOT_MENU_UPT_URL }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          : "${OTA_SIGNING_KEY:?Set GABAGOOL_OTA_SIGNING_KEY to the Ed25519 private key matching apps/sloppy/sloppy_ota_key.h}"
+          : "${BOOT_MENU_UPT_URL:?Set the repository variable BOOT_MENU_UPT_URL to the boot-menu .upt download URL}"
+
+          key="$RUNNER_TEMP/gabagool-release.pem"
+          printf '%s\n' "$OTA_SIGNING_KEY" > "$key"
+          chmod 600 "$key"
+          expected_key="$(grep '^#define SL_OTA_KEY ' apps/sloppy/sloppy_ota_key.h)"
+          actual_key="$(python3 sloppy-dev/ota/make-update.py pubkey "$key" | grep '^#define SL_OTA_KEY ')"
+          test "$actual_key" = "$expected_key" || {
+            echo "OTA signing key does not match apps/sloppy/sloppy_ota_key.h" >&2
+            exit 1
+          }
+
+          mv dist/rockbox.zip "dist/GabagoolOS-${version}-HiBy-R1.zip"
+          curl -fL --retry 3 "$BOOT_MENU_UPT_URL" \
+            -o "dist/GabagoolOS-${version}-boot-menu.upt"
+          test -s "dist/GabagoolOS-${version}-boot-menu.upt"
+          git archive --format=tar --prefix="GabagoolOS-${version}/" "$GITHUB_SHA" \
+            | gzip -9 > "dist/GabagoolOS-${version}-source.tar.gz"
+
+          python3 sloppy-dev/ota/make-update.py all \
+            --key "$key" \
+            --zip "dist/GabagoolOS-${version}-HiBy-R1.zip" \
+            --version "$version" \
+            -o "dist/GabagoolOS-${version}"
+          python3 sloppy-dev/ota/make-update.py feed "dist/GabagoolOS-${version}.gbupdate"
+          rm -f "dist/GabagoolOS-${version}.manifest.json" \
+            "dist/GabagoolOS-${version}.manifest.sig" \
+            "dist/GabagoolOS-${version}.payload.zip"
+          (cd dist && sha256sum * | sort -k2 > SHA256SUMS)
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: GabagoolOS ${{ steps.release_meta.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/GabagoolOS-${{ steps.release_meta.outputs.version }}-boot-menu.upt
+            dist/GabagoolOS-${{ steps.release_meta.outputs.version }}-HiBy-R1.zip
+            dist/GabagoolOS-${{ steps.release_meta.outputs.version }}-source.tar.gz
+            dist/GabagoolOS-${{ steps.release_meta.outputs.version }}.gbupdate
+            dist/gabagoolOS-update.txt
+            dist/SHA256SUMS
