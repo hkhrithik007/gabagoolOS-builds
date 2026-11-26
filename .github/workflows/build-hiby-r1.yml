@@ -1,0 +1,50 @@
+name: Build HiBy R1 firmware
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake bison build-essential flex gawk gettext gzip \
+            libgmp-dev libisl-dev libmpc-dev libmpfr-dev libtool-bin make \
+            patch perl texinfo unzip xz-utils zip
+
+      - name: Build the MIPS Linux toolchain
+        run: |
+          sudo ./tools/rockboxdev.sh \
+            --target=y \
+            --prefix=/usr/local \
+            --builddir="$RUNNER_TEMP/rbdev-build" \
+            --dlwhere="$RUNNER_TEMP/rbdev-download" \
+            --makeflags=-j2
+          echo /usr/local/bin >> "$GITHUB_PATH"
+
+      - name: Configure and build HiBy R1 firmware
+        run: |
+          mkdir build-r1
+          cd build-r1
+          ../tools/configure --target=hibyr1 --type=N
+          make -j2
+          make zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hiby-r1-firmware
+          path: |
+            build-r1/rockbox.r1
+            build-r1/rockbox.zip
+          if-no-files-found: error
